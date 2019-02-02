@@ -76,6 +76,9 @@ func getPageContentByPageNumber(pageNum int) ([]byte, error) {
 func getCleanedTableBodyData(HTMLData []byte) []byte {
 	tbodyStartIndex := bytes.Index(HTMLData, []byte("<tbody>"))
 	tbodyEndIndex := bytes.Index(HTMLData, []byte("</tbody>")) + 8
+	if tbodyStartIndex == -1 || tbodyEndIndex == -1 {
+		return []byte{}
+	}
 	tbodyContent := HTMLData[tbodyStartIndex:tbodyEndIndex]
 
 	tbodyContentString := string(tbodyContent)
