@@ -8,25 +8,49 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
+// struct representing the html table body on the osrs highscores page
 type TableBody struct {
 	XMLName       xml.Name   `xml:"tbody" json:"-"`
-	TableRowsList []TableRow `xml:"tr" json:"row"`
-}
-type TableRow struct {
-	XMLName       xml.Name `xml:"tr" json:"-"`
-	TableDataList []string `xml:"td" json: "item"`
+	TableRowsList []TableRow `xml:"tr" json:"PageData"`
 }
 
-// getContent sends a GET request to the provided url, and returns
-// the page data if possible.
-// @param url - the url the request is being sent to
-// @returns content read from the webpage
-func getContent(url string) ([]byte, error) {
+// struct representing a table row within the html table body
+type TableRow struct {
+	XMLName       xml.Name    `xml:"tr" json:"-"`
+	TableDataList []TableData `xml:"td" json:"RowData"`
+}
+
+// struct representing a data value in the tsable row
+type TableData struct {
+	XMLName xml.Name `xml:"td" json:"-"`
+	Value   string   `xml:",chardata" json:"value"`
+	Name    string   `xml:"a,omitempty" json:"name,omitempty"`
+}
+
+// struct for storing the scraped highscores list in
+type Highscores struct {
+	Users []UserData
+}
+
+// struct for storing scraped user data in
+type UserData struct {
+	Rank  int
+	Name  string
+	Level int
+	XP    int
+}
+
+// getPageContentByPageNumber sends a GET request to the osrs highscores
+// at the provided page number and scrapges the page data.
+// @param pageNum - the page of highscores being scraped.
+// @returns content read from the page
+func getPageContentByPageNumber(pageNum int) ([]byte, error) {
 	// send get request to the url
-	resp, err := http.Get(url)
+	resp, err := http.Get(fmt.Sprintf("https://secure.runescape.com/m=hiscore_oldschool/overall.ws?table=0&page=%d", pageNum))
 	if err != nil {
 		return nil, fmt.Errorf("GET error: %v", err)
 	}
@@ -61,23 +85,39 @@ func getCleanedTableBodyData(HTMLData []byte) []byte {
 	tbodyContentString = strings.Replace(tbodyContentString, "\n", "", -1)
 	// remove encoded spaces
 	tbodyContentString = strings.Replace(tbodyContentString, "\xa0", " ", -1)
+	// remove commas which are used for number formatting
+	tbodyContentString = strings.Replace(tbodyContentString, ",", "", -1)
 
 	return []byte(tbodyContentString)
 }
 
 func main() {
-	HTMLData, err := getContent("https://secure.runescape.com/m=hiscore_oldschool/overall.ws?table=0&page=1")
+	HTMLData, err := getPageContentByPageNumber(1)
 	if err != nil {
 		log.Printf("Failed to get XML: %v\n", err)
 	} else {
 		log.Println("Received XML!")
 
-		highscoreData := getCleanedTableBodyData(HTMLData)
+		cleanedTableBodyData := getCleanedTableBodyData(HTMLData)
+
+		fmt.Printf("%#v", string(cleanedTableBodyData))
 
 		var tb TableBody
-		xml.Unmarshal(highscoreData, &tb)
+		xml.Unmarshal(cleanedTableBodyData, &tb)
 
-		jsonData, _ := json.Marshal(tb)
+		//loop through table data, and store in highscores
+		var hs Highscores
+		for _, rd := range tb.TableRowsList {
+			rdList := rd.TableDataList
+
+			rank, _ := strconv.Atoi(rdList[0].Value)
+			name := rdList[1].Name
+			level, _ := strconv.Atoi(rdList[2].Value)
+			xp, _ := strconv.Atoi(rdList[3].Value)
+			hs.Users = append(hs.Users, UserData{Rank: rank, Name: name, Level: level, XP: xp})
+		}
+
+		jsonData, _ := json.Marshal(hs)
 		log.Println(string(jsonData))
 	}
 }
