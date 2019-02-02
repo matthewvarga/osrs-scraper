@@ -45,7 +45,8 @@ type UserData struct {
 }
 
 // getPageContentByPageNumber sends a GET request to the osrs highscores
-// at the provided page number and scrapges the page data.
+// at the provided page number and scrapges the page data. If no table body
+// is found, returns an empty byte slice.
 // @param pageNum - the page of highscores being scraped.
 // @returns content read from the page
 func getPageContentByPageNumber(pageNum int) ([]byte, error) {
@@ -94,6 +95,32 @@ func getCleanedTableBodyData(HTMLData []byte) []byte {
 	return []byte(tbodyContentString)
 }
 
+// getTableBodyStructFromXML takes cleaned bodyData, and parses the XML
+// into the Table body struct.
+// @param cleanedTablBodyData - XML table body
+// @returns Table Body struct containing the parsed data
+func getTableBodyStructFromXML(cleanedTableBodyData []byte) TableBody {
+	var tb TableBody
+	xml.Unmarshal(cleanedTableBodyData, &tb)
+	return tb
+}
+
+// addUsersToHighscores takes a pointer to the highscores struct and a table
+// body struct containing parsed user data, and puts the user data in the highscores.
+// @param hs - pointer to highscores struct
+// @param tb - table body struct containing parsed data
+func addUsersToHighscores(hs *Highscores, tb TableBody) {
+	for _, rd := range tb.TableRowsList {
+		rdList := rd.TableDataList
+
+		rank, _ := strconv.Atoi(rdList[0].Value)
+		name := rdList[1].Name
+		level, _ := strconv.Atoi(rdList[2].Value)
+		xp, _ := strconv.Atoi(rdList[3].Value)
+		hs.Users = append(hs.Users, UserData{Rank: rank, Name: name, Level: level, XP: xp})
+	}
+}
+
 func main() {
 	HTMLData, err := getPageContentByPageNumber(1)
 	if err != nil {
@@ -103,22 +130,10 @@ func main() {
 
 		cleanedTableBodyData := getCleanedTableBodyData(HTMLData)
 
-		fmt.Printf("%#v", string(cleanedTableBodyData))
-
-		var tb TableBody
-		xml.Unmarshal(cleanedTableBodyData, &tb)
-
-		//loop through table data, and store in highscores
+		//fmt.Printf("%#v", string(cleanedTableBodyData))
+		tb := getTableBodyStructFromXML(cleanedTableBodyData)
 		var hs Highscores
-		for _, rd := range tb.TableRowsList {
-			rdList := rd.TableDataList
-
-			rank, _ := strconv.Atoi(rdList[0].Value)
-			name := rdList[1].Name
-			level, _ := strconv.Atoi(rdList[2].Value)
-			xp, _ := strconv.Atoi(rdList[3].Value)
-			hs.Users = append(hs.Users, UserData{Rank: rank, Name: name, Level: level, XP: xp})
-		}
+		addUsersToHighscores(&hs, tb)
 
 		jsonData, _ := json.Marshal(hs)
 		log.Println(string(jsonData))
