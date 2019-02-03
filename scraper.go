@@ -2,14 +2,20 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
+	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
+
+	"github.com/mongodb/mongo-go-driver/bson"
+	"github.com/mongodb/mongo-go-driver/mongo"
 )
 
 // struct representing the html table body on the osrs highscores page
@@ -33,15 +39,15 @@ type TableData struct {
 
 // struct for storing the scraped highscores list in
 type Highscores struct {
-	Users []UserData
+	Users []UserData `json:"Highscores" bson:"Users"`
 }
 
 // struct for storing scraped user data in
 type UserData struct {
-	Rank  int
-	Name  string
-	Level int
-	XP    int
+	Rank  int    `bson:"Rank"`
+	Name  string `bson:"Name"`
+	Level int    `bson:"Level"`
+	XP    int    `bson:"XP"`
 }
 
 // getPageContentByPageNumber sends a GET request to the osrs highscores
@@ -53,17 +59,17 @@ func getPageContentByPageNumber(pageNum int) ([]byte, error) {
 	// send get request to the url
 	resp, err := http.Get(fmt.Sprintf("https://secure.runescape.com/m=hiscore_oldschool/overall.ws?table=0&page=%d", pageNum))
 	if err != nil {
-		return nil, fmt.Errorf("GET error: %v", err)
+		return []byte{}, fmt.Errorf("GET error: %v", err)
 	}
 	defer resp.Body.Close()
 	// response from webpage was not OK
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Status error: %v", resp.StatusCode)
+		return []byte{}, fmt.Errorf("Status error: %v", resp.StatusCode)
 	}
 	// if the response is OK, read the webpage
 	data, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("Read body: %v", err)
+		return []byte{}, fmt.Errorf("Read body: %v", err)
 	}
 	// return read data
 	return data, nil
@@ -74,11 +80,12 @@ func getPageContentByPageNumber(pageNum int) ([]byte, error) {
 // unwated tags to allow for the data to be parsed as xml
 // @param HTMLData - html data being cleaned
 // @returns cleaned html table body found in the XMLData
-func getCleanedTableBodyData(HTMLData []byte) []byte {
+func getCleanedTableBodyData(HTMLData []byte) ([]byte, error) {
 	tbodyStartIndex := bytes.Index(HTMLData, []byte("<tbody>"))
 	tbodyEndIndex := bytes.Index(HTMLData, []byte("</tbody>")) + 8
 	if tbodyStartIndex == -1 || tbodyEndIndex == -1 {
-		return []byte{}
+		fmt.Printf("%#V", string(HTMLData))
+		return []byte{}, errors.New("no body found")
 	}
 	tbodyContent := HTMLData[tbodyStartIndex:tbodyEndIndex]
 
@@ -92,7 +99,7 @@ func getCleanedTableBodyData(HTMLData []byte) []byte {
 	// remove commas which are used for number formatting
 	tbodyContentString = strings.Replace(tbodyContentString, ",", "", -1)
 
-	return []byte(tbodyContentString)
+	return []byte(tbodyContentString), nil
 }
 
 // getTableBodyStructFromXML takes cleaned bodyData, and parses the XML
@@ -102,6 +109,9 @@ func getCleanedTableBodyData(HTMLData []byte) []byte {
 func getTableBodyStructFromXML(cleanedTableBodyData []byte) TableBody {
 	var tb TableBody
 	xml.Unmarshal(cleanedTableBodyData, &tb)
+	// remove first row form table body since it is always empty
+	tr := tb.TableRowsList
+	tb.TableRowsList = tr[1:]
 	return tb
 }
 
@@ -121,21 +131,103 @@ func addUsersToHighscores(hs *Highscores, tb TableBody) {
 	}
 }
 
-func main() {
-	HTMLData, err := getPageContentByPageNumber(1)
+// loadMongoClient loads the mongo client on localhost
+// @returns a mongo client for the local host
+func loadMongoClient() (*mongo.Client, error) {
+	client, err := mongo.NewClient("mongodb://localhost:27017")
+	if err != nil {
+		fmt.Println(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err = client.Connect(ctx)
+	if err != nil {
+		fmt.Println(err)
+	}
+	return client, err
+}
+
+// retrieveMongoCollection takes a mongo client, database name, and collection name
+// and returns the mongo collection, to be used for CRUD operations
+func retrieveMongoCollection(client *mongo.Client, db string, collection string) *mongo.Collection {
+	col := client.Database(db).Collection(collection)
+	return col
+}
+
+// retrieveHighscoreData takes a pointer to the Highscores struct
+// as well as a page number that will be scraped from the osrs highscores.
+// it then scrapes that data, and adds it to the list of users data in the
+// Highscores struct.
+// @param hs - pointer to Highscores struct where scraped data is being stored
+// @param page- the osrs highscores page number being scraped
+func retrieveHighscoreData(hs *Highscores, page int) {
+	// get page data
+	HTMLData, err := getPageContentByPageNumber(page)
 	if err != nil {
 		log.Printf("Failed to get XML: %v\n", err)
-	} else {
-		log.Println("Received XML!")
-
-		cleanedTableBodyData := getCleanedTableBodyData(HTMLData)
-
-		//fmt.Printf("%#v", string(cleanedTableBodyData))
-		tb := getTableBodyStructFromXML(cleanedTableBodyData)
-		var hs Highscores
-		addUsersToHighscores(&hs, tb)
-
-		jsonData, _ := json.Marshal(hs)
-		log.Println(string(jsonData))
+		wg.Done()
+		return
 	}
+	// clean the data
+	cleanedTableBodyData, err := getCleanedTableBodyData(HTMLData)
+	if err != nil {
+		fmt.Println("error cleaning the data: ")
+		//wg.Done()
+	} else {
+		// read XML into struct
+		tb := getTableBodyStructFromXML(cleanedTableBodyData)
+		// store formatted data in highscores struct
+		addUsersToHighscores(hs, tb)
+	}
+
+	wg.Done()
+}
+
+// writeHighscoresToMongo takes the passed Highscores struct, and writes
+// it into the mongo db running on localhost:27017.
+// it writes the data to the db: osrs collection: highscores
+// with the key being the current timestamp, and val the scraped user data
+// @param hs - Highscores struct being written to db
+func writeHighscoresToMongo(hs *Highscores) {
+	mongodbClient, err := loadMongoClient()
+	if err != nil {
+		fmt.Println("error getting client")
+	}
+
+	osrshsCollection := retrieveMongoCollection(mongodbClient, "osrs", "highscores")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := osrshsCollection.InsertOne(ctx, bson.M{"test": hs.Users})
+	id := res.InsertedID
+	fmt.Printf("finished writing to db, the resulting id is: %s", id)
+}
+
+var wg sync.WaitGroup
+
+func main() {
+	var hs Highscores
+
+	overallStartTime := time.Now()
+	batch := 0
+	for batch < 1 {
+
+		startPage := batch*1000 + 1
+		endPage := (batch + 1) * 1000
+
+		for startPage <= endPage {
+			wg.Add(1)
+			go retrieveHighscoreData(&hs, startPage)
+			startPage++
+		}
+
+		wg.Wait()
+		batch++
+	}
+
+	overallFinishTime := time.Now()
+	overallDiffTime := overallFinishTime.Sub(overallStartTime)
+	fmt.Printf("It took %s to retrieve the data from %d pages\n", overallDiffTime, 10000)
+
+	writeHighscoresToMongo(&hs)
 }
