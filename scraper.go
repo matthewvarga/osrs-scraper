@@ -209,7 +209,7 @@ func main() {
 	var hs Highscores
 
 	overallStartTime := time.Now()
-	batch := 0
+	batch := 0 // temporary for testing purposes
 	for batch < 1 {
 
 		startPage := batch*1000 + 1
